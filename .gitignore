@@ -16,3 +16,4 @@ storage/faiss/*
 storage/metadata/*
 !storage/faiss/.gitkeep
 !storage/metadata/.gitkeep
+.vscode/
