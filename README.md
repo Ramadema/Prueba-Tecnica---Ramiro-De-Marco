@@ -232,7 +232,8 @@ curl -X POST http://localhost:5678/webhook/support-ask \
 ├── storage/
 │   ├── faiss/               # Índice persistido
 │   └── metadata/            # Metadatos de chunks
-├── workflows/               # n8n workflow export
+├── workflows/               # n8n workflow export + verificación
+├── scripts/                 # verify_api.sh, test_n8n_webhook.sh
 └── tests/
 ```
 
@@ -300,6 +301,159 @@ Usar `host.docker.internal` si n8n corre en Docker.
 
 **Primera ejecución lenta**  
 La descarga del modelo `all-MiniLM-L6-v2` ocurre en el primer `/reindex`. La primera respuesta de `/ask` también puede tardar mientras Ollama carga el modelo.
+
+---
+
+## Cumplimiento de consignas (prueba técnica Unilink)
+
+Este repositorio resuelve el ejercicio de **asistente automatizado de soporte** con documentación interna. Resumen de cumplimiento:
+
+| Parte / requisito | Estado | Implementación |
+|-------------------|--------|----------------|
+| **Objetivo:** n8n + Python + REST + LLM local | Cumple | n8n webhook → FastAPI → Ollama |
+| **Parte 1:** Ingesta (.txt, .md, .pdf, .json) | Cumple | [`src/ingest/`](src/ingest/) |
+| **Parte 1:** Limpieza, ruido, fragmentos | Cumple | `TextCleaner` + `SentenceAwareChunker` |
+| **Parte 2:** Workflow n8n + Webhook | Cumple | [`workflows/n8n-rag-assistant.json`](workflows/n8n-rag-assistant.json) |
+| **Parte 3:** Recuperación + no inventar | Cumple | FAISS + `min_score` + prompt grounded |
+| **Parte 3:** Sin info → mensaje explícito | Cumple | *"No encontré información suficiente..."* |
+| **Parte 4:** Contexto, prompts, flujo, claridad | Cumple | [`src/rag/prompts.py`](src/rag/prompts.py), bloques `[1]`, `[2]` |
+| **Parte 5:** Python (chunking, embeddings, etc.) | Cumple | [`src/rag/`](src/rag/), [`src/services/`](src/services/) |
+| **Parte 6:** Errores, timeouts, inputs vacíos | Cumple | Handlers en [`src/main.py`](src/main.py) |
+| **Parte 7:** Local + README + `.env.example` | Cumple | Este documento |
+| **Entregables:** código + workflow n8n | Cumple | `src/`, `workflows/` |
+
+### ¿Hay frontend?
+
+**No.** Las consignas no piden una aplicación web de chat. Los canales de uso son:
+
+- **n8n** (webhook HTTP — canal principal del enunciado)
+- **Swagger** en http://localhost:8000/docs (pruebas manuales)
+- **curl** (pruebas por consola)
+
+### Parte 4 — ¿Por qué Ollama y no OpenAI?
+
+El enunciado general permite *«un LLM local o la capa gratuita de la API OpenAI»*. La Parte 4 del PDF menciona OpenAI API; esta solución opta por **LLM 100% local con Ollama** porque:
+
+- Cumple el requisito de **LLM local**
+- No requiere API key ni costos
+- La inferencia corre en la máquina del evaluador (alineado con deployment local)
+- El procesamiento pesado (embeddings, FAISS, chunking) ya está en Python; Ollama solo genera la respuesta final con el contexto recuperado
+
+---
+
+## Demo para entrevista técnica
+
+Guion sugerido para la presentación oral (15–20 min). Tener **Ollama**, la **API** y, si es posible, **n8n** activos.
+
+### 1. Verificar servicios
+
+```bash
+curl http://localhost:8000/health
+```
+
+Confirmar: `index_loaded: true`, `ollama_reachable: true`, `chunk_count` > 0.
+
+Si `index_loaded` es `false`:
+
+```bash
+curl -X POST http://localhost:8000/reindex
+```
+
+### 2. Preguntas alineadas al corpus (deben responder con fuentes)
+
+| Pregunta (consigna / MineCatalog) | Qué validar |
+|-----------------------------------|-------------|
+| «¿Qué hacer si las credenciales son incorrectas?» | Menciona ERR-AUTH-001 o pasos de `Documentación 3.md`; `sources` no vacío |
+| «¿Cómo soluciono un error de conexión con la base de datos?» | Causas/solución de DB; `sources` apuntan a .txt o .json |
+| «No puedo acceder al dashboard» | Si no hay info en docs → mensaje *sin inventar*, no pasos ficticios |
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Qué hacer si las credenciales son incorrectas?"}'
+```
+
+### 3. Pregunta fuera del corpus (anti-alucinación)
+
+Del enunciado: *«El sistema devuelve error 502, ¿qué significa?»*
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "El sistema devuelve error 502, ¿qué significa?"}'
+```
+
+**Comportamiento esperado:** respuesta explícita de que no hay información en la documentación (o `sources: []`), **sin** inventar significado del 502.
+
+### 4. Flujo n8n (Parte 2)
+
+1. Importar [`workflows/n8n-rag-assistant.json`](workflows/n8n-rag-assistant.json)
+2. Activar el workflow
+3. Probar el webhook (puerto 5678 por defecto):
+
+```bash
+curl -X POST http://localhost:5678/webhook/support-ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Cómo reinicio el servicio de autenticación?"}'
+```
+
+Script alternativo (misma prueba): [`scripts/test_n8n_webhook.sh`](scripts/test_n8n_webhook.sh)  
+Checklist detallada: [`workflows/VERIFICACION_N8N.md`](workflows/VERIFICACION_N8N.md)
+
+### 5. Guion oral (30 segundos por punto)
+
+1. **Arquitectura:** ingesta offline (`/reindex`) + consulta online (`/ask`); Python procesa documentos; n8n solo enruta HTTP.
+2. **Anti-alucinación:** umbral de similitud + prompt con contexto numerado + sin LLM si no hay chunks relevantes.
+3. **Stack local:** MiniLM + FAISS + Ollama, sin servicios cloud de pago.
+4. **Limitaciones:** sin UI de chat; calidad acotada al contenido de `docs/`.
+
+---
+
+## Entrega en GitHub
+
+Requisito de la consigna: repositorio **público** con nombre:
+
+```text
+Prueba Técnica – (Nombre Postulante)
+```
+
+Reemplazá `(Nombre Postulante)` por tu nombre real.
+
+### Pasos
+
+Checklist completa: [`GITHUB_ENTREGA.md`](GITHUB_ENTREGA.md)
+
+```bash
+cd "ML - Unilink"
+
+# Verificar que .env NO se sube (debe aparecer en .gitignore)
+git check-ignore -v .env   # esperado: .gitignore:9:.env    .env
+git ls-files .env          # no debe imprimir nada
+
+# Crear repo público en github.com/new con el nombre de la consigna
+git remote add origin https://github.com/TU_USUARIO/Prueba-Tecnica-Tu-Nombre.git
+git push -u origin develop
+```
+
+### Qué incluir en el repo
+
+| Incluir | No incluir |
+|---------|------------|
+| `src/`, `docs/`, `tests/`, `workflows/` | `.env` (secretos locales) |
+| `requirements.txt`, `.env.example`, `README.md` | `.venv/` |
+| `run.sh`, `scripts/` | `__pycache__/`, `.pytest_cache/` |
+
+El índice en `storage/` puede omitirse del commit (está en `.gitignore`); el evaluador lo regenera con `POST /reindex`.
+
+### Enlace al repo
+
+Repositorio configurado en este proyecto:
+
+**https://github.com/Ramadema/Prueba-Tecnica---Ramiro-De-Marco**
+
+La consigna sugiere el nombre `Prueba Técnica – (Nombre Postulante)`. Si el evaluador exige el nombre exacto, renombrá el repo en GitHub → **Settings** → **Repository name** o creá uno nuevo y actualizá `git remote`.
+
+---
 
 ## Licencia
 
